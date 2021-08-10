@@ -15,10 +15,12 @@
 """Contains the dropout layer."""
 # pylint: disable=g-classes-have-attributes,g-direct-tensorflow-import
 
-from keras import backend as K
+from keras import backend
 from keras.engine.base_layer import Layer
 from keras.utils import control_flow_util
+
 import tensorflow.compat.v2 as tf
+
 from tensorflow.python.util.tf_export import keras_export
 
 # TODO(b/168039935): track dropout rate to decide whether/how to make a
@@ -94,6 +96,7 @@ class Dropout(Layer):
     self.noise_shape = noise_shape
     self.seed = seed
     self.supports_masking = True
+    self._random_generator = backend.RandomGenerator(seed)
 
   def _get_noise_shape(self, inputs):
     # Subclasses of `Dropout` may implement `_get_noise_shape(self, inputs)`,
@@ -110,18 +113,16 @@ class Dropout(Layer):
 
   def call(self, inputs, training=None):
     if training is None:
-      training = K.learning_phase()
+      training = backend.learning_phase()
 
     def dropped_inputs():
-      return tf.nn.dropout(
+      return self._random_generator.dropout(
           inputs,
           noise_shape=self._get_noise_shape(inputs),
-          seed=self.seed,
           rate=self.rate)
 
-    output = control_flow_util.smart_cond(training, dropped_inputs,
-                                          lambda: tf.identity(inputs))
-    return output
+    return control_flow_util.smart_cond(training, dropped_inputs,
+                                        lambda: tf.identity(inputs))
 
   def compute_output_shape(self, input_shape):
     return input_shape

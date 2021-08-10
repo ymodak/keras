@@ -16,6 +16,8 @@
 # pylint: disable=redefined-outer-name
 # pylint: disable=redefined-builtin
 # pylint: disable=g-classes-have-attributes
+# pylint: disable=g-bad-import-order
+# pylint: disable=missing-function-docstring
 """Keras backend API."""
 
 import tensorflow.compat.v2 as tf
@@ -24,6 +26,7 @@ import collections
 import itertools
 import json
 import os
+import random
 import sys
 import threading
 import warnings
@@ -1706,6 +1709,100 @@ def identity(x, name=None):
       A tensor of the same shape, type and content.
   """
   return tf.identity(x, name=name)
+
+
+# Global flag to enforce new stateful RNG for RandomGenerator.
+# When this is enabled, for any caller to RandomGenerator without seed,
+# RandomGenerator will use tf.random.get_global_generator to generate the RNG.
+# The legacy behavior is to use stateful tf.random ops when seed is not provided
+_ENFORCE_NEW_STATEFUL_RNG = False
+
+
+def is_new_stateful_rng_enforced():
+  return _ENFORCE_NEW_STATEFUL_RNG
+
+
+def enforce_new_stateful_rng():
+  global _ENFORCE_NEW_STATEFUL_RNG
+  _ENFORCE_NEW_STATEFUL_RNG = True
+
+
+def disable_new_stateful_rng():
+  global _ENFORCE_NEW_STATEFUL_RNG
+  _ENFORCE_NEW_STATEFUL_RNG = False
+
+
+class RandomGenerator:
+  """Random generator that selects appropriate random ops.
+
+  This class contains the logic for legacy stateful random ops, as well as the
+  new stateless random ops with seeds and tf.random.Generator. Any class that
+  relies on RNG (eg initializer, shuffle, dropout) should use this class to
+  handle the transition from legacy RNG to new stateless RNG.
+  """
+
+  def __init__(self, seed=None):
+    super(RandomGenerator, self).__init__()
+    if tf.compat.v1.executing_eagerly_outside_functions():
+      # In the case of V2, we use tf.random.Generator to create all the random
+      # numbers and seeds.
+      if seed is not None:
+        self._generator = tf.random.Generator.from_seed(seed)
+      elif is_new_stateful_rng_enforced():
+        self._generator = tf.random.get_global_generator()
+      else:
+        # We go back to old approach of using stateless op with self generated
+        # seeds
+        self._seed = [random.randint(0, 1e9), 0]
+        self._generator = None
+    else:
+      # Stateless random ops requires 2-int seed.
+      if seed is not None:
+        self._seed = [seed, 0]
+      else:
+        # We create a new random seed if user didn't provide any.
+        self._seed = [random.randint(0, 1e9), 0]
+      self._generator = None
+
+  def get_new_seed(self):
+    if self._generator:
+      return self._generator.make_seeds()[:, 0]
+    else:
+      seed = self._seed
+      self._seed[0] += 1
+      return seed
+
+  def random_normal(self, shape, mean=0., stddev=1., dtype=tf.dtypes.float32):
+    if self._generator:
+      return self._generator.normal(shape=shape, mean=mean, stddev=stddev,
+                                    dtype=dtype)
+    else:
+      return tf.random.stateless_normal(shape=shape, mean=mean, stddev=stddev,
+                                        dtype=dtype, seed=self.get_new_seed())
+
+  def random_uniform(self, shape, minval=0., maxval=None,
+                     dtype=tf.dtypes.float32):
+    if self._generator:
+      return self._generator.uniform(
+          shape=shape, minval=minval, maxval=maxval, dtype=dtype)
+    else:
+      return tf.random.stateless_uniform(
+          shape=shape, minval=minval, maxval=maxval, dtype=dtype,
+          seed=self.get_new_seed())
+
+  def truncated_normal(self, shape, mean=0., stddev=1.,
+                       dtype=tf.dtypes.float32):
+    if self._generator:
+      return self._generator.truncated_normal(
+          shape=shape, mean=mean, stddev=stddev, dtype=dtype)
+    else:
+      return tf.random.stateless_truncated_normal(
+          shape=shape, mean=mean, stddev=stddev, dtype=dtype,
+          seed=self.get_new_seed())
+
+  def dropout(self, inputs, rate, noise_shape=None):
+    return tf.nn.experimental.stateless_dropout(
+        inputs, rate=rate, noise_shape=noise_shape, seed=self.get_new_seed())
 
 
 @keras_export('keras.backend.random_uniform_variable')
