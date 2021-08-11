@@ -157,6 +157,12 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
       tensor containing the string vocbulary terms. If passing a file path, the
       file should contain one line per term in the vocabulary. If this argument
       is set, there is no need to `adapt` the layer.
+    ragged: Boolean. Only applicable to `"int"` output modes. If True, returns a
+      `RaggedTensor` instead of a dense `Tensor`, where each sequence may have a
+      different length after string splitting. Defaults to False.
+    sparse: Boolean. Only applicable to `"multi_hot"` and `"count"`, and
+      `"tf_idf"` output modes. If True, returns a `SparseTensor` instead of a
+      dense `Tensor`. Defaults to False.
 
   Example:
 
@@ -233,6 +239,8 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
                output_sequence_length=None,
                pad_to_max_tokens=False,
                vocabulary=None,
+               sparse=False,
+               ragged=False,
                **kwargs):
 
     # This layer only applies to string processing, and so should only have
@@ -278,20 +286,30 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
             isinstance(ngrams, int) or
             isinstance(ngrams, tuple) and
             all(isinstance(item, int) for item in ngrams)):
-      raise ValueError(("`ngrams` must be None, an integer, or a tuple of "
-                        "integers. Got %s") % (ngrams,))
+      raise ValueError(f"`ngrams` must be None, an integer, or a tuple of "
+                       f"integers. Received: ngrams={ngrams}")
 
     # 'output_sequence_length' must be one of (None, int) and is only
     # set if output_mode is INT.
     if (output_mode == INT and not (isinstance(output_sequence_length, int) or
                                     (output_sequence_length is None))):
-      raise ValueError("`output_sequence_length` must be either None or an "
-                       "integer when `output_mode` is 'int'. "
-                       "Got %s" % output_sequence_length)
+      raise ValueError(f"`output_sequence_length` must be either None or an "
+                       f"integer when `output_mode` is 'int'. Received: "
+                       f"output_sequence_length={output_sequence_length}")
 
     if output_mode != INT and output_sequence_length is not None:
       raise ValueError("`output_sequence_length` must not be set if "
                        "`output_mode` is not 'int'.")
+
+    if ragged and output_mode != INT:
+      raise ValueError(f"`ragged` must not be true if `output_mode` is "
+                       f"`'int'`. Received: ragged={ragged} and "
+                       f"output_mode={output_mode}")
+
+    if ragged and output_sequence_length is not None:
+      raise ValueError(f"`output_sequence_length` must not be set if ragged "
+                       f"is True. Received: ragged={ragged} and "
+                       f"output_sequence_length={output_sequence_length}")
 
     self._max_tokens = max_tokens
     self._standardize = standardize
@@ -301,6 +319,7 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
       self._ngrams = tuple(range(1, ngrams + 1))
     else:
       self._ngrams = ngrams
+    self._ragged = ragged
 
     self._output_mode = output_mode
     self._output_sequence_length = output_sequence_length
@@ -316,7 +335,8 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
         vocabulary=vocabulary,
         pad_to_max_tokens=pad_to_max_tokens,
         mask_token="",
-        output_mode=output_mode if output_mode is not None else INT)
+        output_mode=output_mode if output_mode is not None else INT,
+        sparse=sparse)
 
   def compute_output_shape(self, input_shape):
     if self._output_mode == INT:
@@ -375,6 +395,8 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
         "output_mode": self._output_mode,
         "output_sequence_length": self._output_sequence_length,
         "pad_to_max_tokens": self._index_lookup_layer.pad_to_max_tokens,
+        "sparse": self._index_lookup_layer.sparse,
+        "ragged": self._ragged,
     }
     base_config = super(TextVectorization, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))
@@ -485,6 +507,9 @@ class TextVectorization(base_preprocessing_layer.PreprocessingLayer):
 
     # For any non-int output, we can return directly from the underlying layer.
     if self._output_mode is not INT:
+      return lookup_data
+
+    if self._ragged:
       return lookup_data
 
     # If we have a ragged tensor, we can pad during the conversion to dense.
